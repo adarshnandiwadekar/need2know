@@ -481,10 +481,6 @@ export default function Home() {
 
   const handleFile = async (file?: File) => {
     if (!file) return;
-    if (file.size > 2_000_000) {
-      setUploadError("Keep uploads under 2 MB for this local analysis workspace.");
-      return;
-    }
     setUploadError("");
     setUploading(true);
     try {
@@ -575,7 +571,7 @@ export default function Home() {
                   <input id="file-upload" type="file" accept="*/*" onChange={(event) => handleFile(event.target.files?.[0])} />
                   <label htmlFor="file-upload" className="dropzone-label">
                     <div className="upload-icon"><Upload size={19} /></div>
-                    <div><strong>{uploading ? "Extracting readable text…" : "Drop any file here"}</strong><span>PDF, DOCX, TXT, or any text-like file · 2 MB max</span></div>
+                    <div><strong>{uploading ? "Extracting readable text…" : "Drop any file here"}</strong><span>PDF, DOCX, TXT, or any text-like file · no app upload cap</span></div>
                   </label>
                 </div>
                 <div className="paste-wrap">
