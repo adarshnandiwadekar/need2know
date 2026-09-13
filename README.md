@@ -29,7 +29,7 @@ The current website includes a functional browser-local fallback pipeline that w
 
 ## Upload support
 
-The file picker accepts **any file type** with no application-enforced upload-size cap. The browser extracts readable text from `.txt`, PDF, and DOCX files. Other text-like formats are decoded as UTF-8 when possible. Binary formats that do not expose readable text are rejected with a clear message instead of being treated as successfully analyzed. Very large files may still be constrained by the browser, device memory, or hosting platform, and extraction errors are surfaced honestly.
+The file picker accepts **any file type**. The browser extracts readable text from `.txt`, PDF, and DOCX files. Other text-like formats are decoded as UTF-8 when possible. Binary formats that do not expose readable text are rejected with a clear message instead of being treated as successfully analyzed. Uploads are limited to 2 MB in this local workspace.
 
 ## Honest scope of this delivery
 
