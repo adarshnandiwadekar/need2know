@@ -389,6 +389,37 @@ function formatNumber(value: number) {
   return new Intl.NumberFormat("en-US").format(value);
 }
 
+async function extractUploadedText(file: File) {
+  const lowerName = file.name.toLowerCase();
+  const arrayBuffer = await file.arrayBuffer();
+
+  if (file.type === "application/pdf" || lowerName.endsWith(".pdf")) {
+    const pdfjs = await import("pdfjs-dist");
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+    const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+    const pages: string[] = [];
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      const content = await page.getTextContent();
+      pages.push(content.items.map((item) => ("str" in item ? item.str : "")).join(" "));
+    }
+    return pages.join("\n\n").trim();
+  }
+
+  if (file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || lowerName.endsWith(".docx")) {
+    const mammoth = await import("mammoth/mammoth.browser");
+    const result = await mammoth.extractRawText({ arrayBuffer });
+    return result.value.trim();
+  }
+
+  const decoded = new TextDecoder().decode(arrayBuffer);
+  const controlCharacters = (decoded.match(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g) ?? []).length;
+  if (controlCharacters > Math.max(4, decoded.length * 0.01)) {
+    throw new Error("This file is binary and does not expose readable text in the browser.");
+  }
+  return decoded.trim();
+}
+
 function classNames(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
 }
@@ -413,6 +444,7 @@ export default function Home() {
   const [selectedFindingId, setSelectedFindingId] = useState<string | null>(null);
   const [showFiltered, setShowFiltered] = useState(false);
   const [uploadError, setUploadError] = useState("");
+  const [uploading, setUploading] = useState(false);
   const [analysisTick, setAnalysisTick] = useState(0);
   const sourceRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
@@ -447,25 +479,26 @@ export default function Home() {
     }
   };
 
-  const handleFile = (file?: File) => {
+  const handleFile = async (file?: File) => {
     if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".txt")) {
-      setUploadError("This browser-only build reads .txt files directly. PDF and DOCX need the server extraction path and are intentionally not simulated here.");
-      return;
-    }
     if (file.size > 2_000_000) {
       setUploadError("Keep uploads under 2 MB for this local analysis workspace.");
       return;
     }
     setUploadError("");
-    const reader = new FileReader();
-    reader.onload = () => {
-      setDocumentText(String(reader.result ?? ""));
+    setUploading(true);
+    try {
+      const extractedText = await extractUploadedText(file);
+      if (!extractedText) throw new Error("No readable text was found in this file.");
+      setDocumentText(extractedText);
       setDocumentName(file.name);
       setView("analyze");
       setSourceOpen(false);
-    };
-    reader.readAsText(file);
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : "Could not extract readable text from this file.");
+    } finally {
+      setUploading(false);
+    }
   };
 
   const loadFixture = (fixture: (typeof FIXTURES)[number]) => {
@@ -539,10 +572,10 @@ export default function Home() {
               </div>
               <div className="ingest-grid">
                 <div className="dropzone">
-                  <input id="file-upload" type="file" accept=".txt,text/plain" onChange={(event) => handleFile(event.target.files?.[0])} />
+                  <input id="file-upload" type="file" accept="*/*" onChange={(event) => handleFile(event.target.files?.[0])} />
                   <label htmlFor="file-upload" className="dropzone-label">
                     <div className="upload-icon"><Upload size={19} /></div>
-                    <div><strong>Drop a TXT file here</strong><span>or click to browse · 2 MB max</span></div>
+                    <div><strong>{uploading ? "Extracting readable text…" : "Drop any file here"}</strong><span>PDF, DOCX, TXT, or any text-like file · 2 MB max</span></div>
                   </label>
                 </div>
                 <div className="paste-wrap">

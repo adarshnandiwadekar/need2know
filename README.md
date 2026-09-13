@@ -27,9 +27,13 @@ The current website includes a functional browser-local fallback pipeline that w
 8. **Template explanations.** Every finding receives a category-specific explanation using the sentence’s detected dates, amounts, or obligation signals.
 9. **Evaluation dashboard.** Six manually labeled demo fixtures are replayed through the same pipeline. Precision, recall, F1, category breakdown, and inspectable TP/FP/FN examples are computed at runtime.
 
+## Upload support
+
+The file picker accepts **any file type**. The browser extracts readable text from `.txt`, PDF, and DOCX files. Other text-like formats are decoded as UTF-8 when possible. Binary formats that do not expose readable text are rejected with a clear message instead of being treated as successfully analyzed. Uploads are limited to 2 MB in this local workspace.
+
 ## Honest scope of this delivery
 
-The managed website scaffold used for this delivery is a React + Vite + TypeScript + Tailwind + Express/tRPC application with a managed database capability. It is not a Python/FastAPI + SQLite runtime, so this version deliberately ships the functional browser-local fallback rather than pretending that a FastAPI/SQLite backend exists. The fallback supports pasted text and `.txt` upload directly in the browser; PDF/DOCX upload is explicitly rejected instead of being simulated.
+The managed website scaffold used for this delivery is a React + Vite + TypeScript + Tailwind + Express/tRPC application with a managed database capability. It is not a Python/FastAPI + SQLite runtime, so this version deliberately ships the functional browser-local fallback rather than pretending that a FastAPI/SQLite backend exists. PDF and DOCX extraction is implemented client-side with `pdfjs-dist` and `mammoth`; page/paragraph persistence and server-side extraction are not included.
 
 No external LLM API is required. The core extraction, model scoring, ranking, deduplication, filtering, source linking, and evaluation all work with the API key unset. The current website does not claim persistence, PDF/DOCX parsing, or production-scale ML generalization.
 
