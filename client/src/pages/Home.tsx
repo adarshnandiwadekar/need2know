@@ -93,11 +93,11 @@ type EvaluationResult = {
 
 const CATEGORIES: Category[] = ["Deadline", "Requirement", "Eligibility", "Cost", "Change"];
 const CATEGORY_META: Record<Category, { number: string; label: string; color: string; soft: string }> = {
-  Deadline: { number: "01", label: "DEADLINES", color: "#B8863B", soft: "#F2E9D8" },
-  Requirement: { number: "02", label: "REQUIREMENTS", color: "#C41E2A", soft: "#F5E0E2" },
-  Eligibility: { number: "03", label: "ELIGIBILITY", color: "#5C6B3F", soft: "#E5E9DE" },
-  Cost: { number: "04", label: "COSTS", color: "#8C8377", soft: "#E9E4DD" },
-  Change: { number: "05", label: "CHANGES", color: "#6457A6", soft: "#E8E5F4" },
+  Deadline: { number: "01", label: "DEADLINES", color: "#C97A2E", soft: "#FFF1E2" },
+  Requirement: { number: "02", label: "REQUIREMENTS", color: "#5A91B8", soft: "#EAF5FB" },
+  Eligibility: { number: "03", label: "ELIGIBILITY", color: "#3E8E7E", soft: "#E8F5F1" },
+  Cost: { number: "04", label: "COSTS", color: "#9AA5AD", soft: "#EEF1F3" },
+  Change: { number: "05", label: "CHANGES", color: "#6F8FA5", soft: "#EAF0F4" },
 };
 
 const CONTEXT_WEIGHTS: Record<Context, Record<Category, number>> = {
