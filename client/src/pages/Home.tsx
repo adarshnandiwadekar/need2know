@@ -1,23 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, MutableRefObject } from "react";
+import type { CSSProperties, DragEvent, MutableRefObject } from "react";
+import { useTheme } from "@/contexts/ThemeContext";
 import {
   AlertTriangle,
   ArrowUpRight,
   BarChart3,
+  Bell,
   BookOpenCheck,
+  CalendarDays,
   Check,
   ChevronDown,
   CircleHelp,
   ClipboardList,
+  Clock3,
+  Copy,
+  Download,
   ExternalLink,
   FileText,
   Filter,
+  GitCompareArrows,
   Gauge,
   Info,
   Layers3,
   LibraryBig,
   ListFilter,
   Menu,
+  Mail,
+  Moon,
   ScanSearch,
   Search,
   ShieldCheck,
@@ -26,11 +35,15 @@ import {
   Target,
   Upload,
   X,
+  Sun,
 } from "lucide-react";
 
 type Category = "Deadline" | "Requirement" | "Eligibility" | "Cost" | "Change";
 type Context = "Student" | "Job Seeker" | "Policy / Compliance" | "General Reader";
-type View = "analyze" | "evaluation" | "method";
+  type View = "analyze" | "evaluation" | "method";
+type HistoryItem = { id: string; name: string; text: string; context: Context; savedAt: string };
+type FeedbackValue = "useful" | "irrelevant";
+type DocumentType = "Notice" | "Job posting" | "Policy circular" | "General brief";
 
 type Sentence = {
   id: number;
@@ -59,6 +72,8 @@ type Finding = {
   signals: string[];
   occurrences: Occurrence[];
   filteredReason?: string;
+  reviewReason?: string;
+  evidence: { terms: string[]; rules: string[] };
 };
 
 type EvaluationResult = {
@@ -181,6 +196,9 @@ const FIXTURES: Array<{ title: string; text: string; labels: Array<{ category: C
   },
 ];
 
+const HISTORY_KEY = "need2know-history-v1";
+const FEEDBACK_KEY = "need2know-feedback-v1";
+
 function tokenize(value: string) {
   return value.toLowerCase().match(/[a-z0-9₹$]+/g) ?? [];
 }
@@ -215,7 +233,7 @@ function trainNaiveBayes() {
     });
   });
 
-  return (text: string) => {
+  const classifyText = (text: string) => {
     const tokens = tokenize(text);
     const scores = CATEGORIES.map((category) => {
       let logProbability = Math.log(categoryCounts[category] / TRAINING_ROWS.length);
@@ -230,9 +248,17 @@ function trainNaiveBayes() {
     const ranked = normalized.map((item) => ({ ...item, probability: item.probability / total })).sort((a, b) => b.probability - a.probability);
     return { category: ranked[0].category, confidence: Math.max(0.42, ranked[0].probability) };
   };
+
+  const explain = (text: string, category: Category) => {
+    const tokens = Array.from(new Set(tokenize(text)));
+    const terms = tokens.map((token) => ({ token, weight: (tokenCounts[category][token] ?? 0) / Math.max(1, totalTokens[category]) })).sort((a, b) => b.weight - a.weight).slice(0, 4).map(({ token }) => token);
+    return { terms, rules: categorySignals(text).find((item) => item.category === category)?.signals ?? [] };
+  };
+  return { classify: classifyText, explain };
 }
 
-const classify = trainNaiveBayes();
+const naiveBayes = trainNaiveBayes();
+const classify = naiveBayes.classify;
 
 function categorySignals(text: string): Array<{ category: Category; signals: string[] }> {
   const lower = text.toLowerCase();
@@ -317,6 +343,7 @@ function analyzeDocument(text: string, context: Context, threshold: number) {
         specificity,
         positionWeight,
         signals,
+        evidence: naiveBayes.explain(sentence.text, category),
         occurrences: [{ sentenceId: sentence.id, text: sentence.text, start: sentence.start, end: sentence.end }],
       });
     });
@@ -329,6 +356,8 @@ function analyzeDocument(text: string, context: Context, threshold: number) {
       existing.occurrences.push(...candidate.occurrences);
       existing.score = Math.max(existing.score, candidate.score);
       existing.signals = Array.from(new Set([...existing.signals, ...candidate.signals]));
+      existing.evidence.terms = Array.from(new Set([...existing.evidence.terms, ...candidate.evidence.terms])).slice(0, 4);
+      existing.evidence.rules = Array.from(new Set([...existing.evidence.rules, ...candidate.evidence.rules]));
       return;
     }
     deduped.push(candidate);
@@ -338,6 +367,7 @@ function analyzeDocument(text: string, context: Context, threshold: number) {
   const withReasons = ranked.map((finding) => ({
     ...finding,
     filteredReason: finding.score < threshold ? `Below threshold (${finding.score.toFixed(2)} < ${threshold.toFixed(2)})` : undefined,
+    reviewReason: finding.score < threshold && finding.score >= Math.max(0, threshold - 0.12) ? "Borderline score — verify before ignoring" : undefined,
   }));
   return { sentences, rawCandidateCount: rawCandidates.length, findings: withReasons };
 }
@@ -389,6 +419,120 @@ function formatNumber(value: number) {
   return new Intl.NumberFormat("en-US").format(value);
 }
 
+function inferDocumentType(text: string): { type: DocumentType; confidence: number; context: Context } {
+  const lower = text.toLowerCase();
+  const signals: Array<{ type: DocumentType; context: Context; words: string[] }> = [
+    { type: "Job posting", context: "Job Seeker", words: ["candidate", "interview", "portfolio", "experience", "role"] },
+    { type: "Policy circular", context: "Policy / Compliance", words: ["policy", "revised", "effective from", "compliance", "audit", "department"] },
+    { type: "Notice", context: "Student", words: ["application", "applicants", "fellowship", "scholarship", "registration", "notice"] },
+  ];
+  const ranked = signals.map((signal) => ({ ...signal, count: signal.words.filter((word) => lower.includes(word)).length })).sort((a, b) => b.count - a.count);
+  const winner = ranked[0];
+  return winner.count ? { type: winner.type, context: winner.context, confidence: Math.min(0.96, 0.55 + winner.count * 0.1) } : { type: "General brief", context: "General Reader", confidence: 0.46 };
+}
+
+function compareVersions(leftText: string, rightText: string) {
+  const left = splitSentences(leftText);
+  const right = splitSentences(rightText);
+  const rightSet = new Set(right.map((sentence) => sentence.text.toLowerCase()));
+  const leftSet = new Set(left.map((sentence) => sentence.text.toLowerCase()));
+  return {
+    added: right.filter((sentence) => !leftSet.has(sentence.text.toLowerCase())),
+    removed: left.filter((sentence) => !rightSet.has(sentence.text.toLowerCase())),
+    unchanged: right.filter((sentence) => leftSet.has(sentence.text.toLowerCase())),
+  };
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character] ?? character);
+}
+
+function printDigest(documentName: string, documentType: DocumentType, findings: Finding[], brief: string) {
+  const popup = window.open("", "_blank", "noopener,noreferrer,width=860,height=900");
+  if (!popup) return false;
+  const rows = findings.slice(0, 12).map((finding) => `<li><strong>${escapeHtml(finding.category)}</strong> — ${escapeHtml(finding.sentence)}<small>${escapeHtml(finding.explanation)}</small></li>`).join("");
+  popup.document.write(`<!doctype html><html><head><title>Need2Know Digest — ${escapeHtml(documentName)}</title><style>body{font:13px Georgia,serif;color:#1a1613;max-width:760px;margin:0 auto;padding:42px}h1{font:32px Arial,sans-serif;text-transform:uppercase;margin:0 0 6px}h2{font:18px Georgia,serif;border-bottom:1px solid #d8d0c5;padding-bottom:8px;margin-top:28px}.meta{font:11px monospace;color:#776d62;margin-bottom:26px}ol{padding-left:22px}li{margin:0 0 12px;line-height:1.45}li strong{color:#c41e2a;text-transform:uppercase;font:11px monospace}small{display:block;color:#6d645b;font:11px Arial,sans-serif;margin-top:3px}.brief{white-space:pre-wrap;background:#1a1613;color:#f1d0c3;padding:16px;font:11px monospace;line-height:1.5}@media print{body{padding:0}}</style></head><body><h1>Need2Know</h1><div class="meta">ONE-PAGE ACTION DIGEST · ${escapeHtml(documentType)} · ${escapeHtml(documentName)}</div><h2>Priority brief</h2><div class="brief">${escapeHtml(brief)}</div><h2>Traceable findings</h2><ol>${rows}</ol><div class="meta">Generated locally. Verify every item against the original source before acting.</div><script>window.onload=()=>window.print();</script></body></html>`);
+  popup.document.close();
+  return true;
+}
+
+function downloadDigestText(documentName: string, documentType: DocumentType, findings: Finding[], brief: string) {
+  const lines = [`NEED2KNOW ONE-PAGE ACTION DIGEST`, `Document type: ${documentType}`, `Document: ${documentName}`, "", brief, "", "TRACEABLE FINDINGS", ...findings.slice(0, 12).map((finding) => `[${finding.category}] ${finding.sentence}\n${finding.explanation}`), "", "Verify every item against the original source before acting."];
+  const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${documentName.replace(/\.[^.]+$/, "") || "need2know"}-digest.txt`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadFindings(findings: Finding[], documentName: string) {
+  const payload = findings.map(({ id, category, sentence, explanation, score, confidence, signals, occurrences }) => ({ id, category, sentence, explanation, relevance: score, confidence, signals, occurrences: occurrences.map(({ sentenceId }) => sentenceId + 1) }));
+  const blob = new Blob([JSON.stringify({ document: documentName, exportedAt: new Date().toISOString(), findings: payload }, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${documentName.replace(/\.[^.]+$/, "") || "need2know-findings"}-findings.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function createAiBrief(findings: Finding[], documentName: string) {
+  const deadlines = findings.filter((finding) => finding.category === "Deadline").slice(0, 2);
+  const requirements = findings.filter((finding) => finding.category === "Requirement").slice(0, 2);
+  const costs = findings.filter((finding) => finding.category === "Cost").slice(0, 2);
+  const lines = [`Action brief for ${documentName}`, "", "Priority actions:"];
+  deadlines.forEach((finding) => lines.push(`• Confirm: ${finding.sentence}`));
+  requirements.forEach((finding) => lines.push(`• Prepare: ${finding.sentence}`));
+  if (!deadlines.length && !requirements.length) lines.push("• Review the surfaced findings below and verify them against the source.");
+  if (costs.length) {
+    lines.push("", "Money to check:");
+    costs.forEach((finding) => lines.push(`• ${finding.sentence}`));
+  }
+  return lines.join("\n");
+}
+
+function icsEscape(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+}
+
+function deadlineDate(sentence: string) {
+  const match = sentence.match(/\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*(\d{4})?\b/i);
+  if (!match) return null;
+  const month = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].indexOf(match[2].slice(0, 3).toLowerCase());
+  const year = Number(match[3] ?? new Date().getFullYear());
+  const day = Number(match[1]);
+  return month >= 0 ? `${year}${String(month + 1).padStart(2, "0")}${String(day).padStart(2, "0")}` : null;
+}
+
+function downloadCalendar(findings: Finding[], documentName: string) {
+  const deadlines = findings.filter((finding) => finding.category === "Deadline");
+  const today = new Date();
+  const fallbackDate = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  const events = deadlines.map((finding) => {
+    const date = deadlineDate(finding.sentence) ?? fallbackDate;
+    const needsVerification = deadlineDate(finding.sentence) ? "" : " [VERIFY DATE]";
+    return ["BEGIN:VEVENT", `UID:${finding.id}@need2know`, `DTSTAMP:${stamp}`, `DTSTART;VALUE=DATE:${date}`, `SUMMARY:${icsEscape(`Need2Know: ${finding.sentence.slice(0, 100)}${needsVerification}`)}`, `DESCRIPTION:${icsEscape(`Extracted from ${documentName}. Verify the original source before relying on this reminder.`)}`, "END:VEVENT"].join("\r\n");
+  });
+  const calendar = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Need2Know//Actionability Intelligence//EN", ...events, "END:VCALENDAR"].join("\r\n");
+  const blob = new Blob([calendar], { type: "text/calendar;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${documentName.replace(/\.[^.]+$/, "") || "need2know"}-deadlines.ics`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function openEmailDraft(findings: Finding[], documentName: string) {
+  const lines = findings.slice(0, 12).map((finding) => `• ${finding.category}: ${finding.sentence}`);
+  const subject = `Need2Know action digest — ${documentName}`;
+  const body = [`Key items extracted from ${documentName}:`, "", ...lines, "", "Please verify each item against the original source before acting.", "", "Generated locally by Need2Know."].join("\n");
+  window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
 async function extractUploadedText(file: File) {
   const lowerName = file.name.toLowerCase();
   const arrayBuffer = await file.arrayBuffer();
@@ -434,7 +578,12 @@ function NavItem({ icon: Icon, label, active, onClick }: { icon: typeof Search; 
   );
 }
 
+function WorkspaceLink({ icon: Icon, label, onClick }: { icon: typeof Search; label: string; onClick: () => void }) {
+  return <button className="workspace-link" onClick={onClick}><Icon size={14} strokeWidth={1.8} /><span>{label}</span><ArrowUpRight size={12} className="workspace-link-arrow" /></button>;
+}
+
 export default function Home() {
+  const { theme, toggleTheme } = useTheme();
   const [view, setView] = useState<View>("analyze");
   const [context, setContext] = useState<Context>("Student");
   const [threshold, setThreshold] = useState(0.35);
@@ -445,17 +594,65 @@ export default function Home() {
   const [showFiltered, setShowFiltered] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [findingQuery, setFindingQuery] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<"All" | Category>("All");
+  const [completedActions, setCompletedActions] = useState<string[]>([]);
+  const [copyStatus, setCopyStatus] = useState("Copy brief");
+  const [feedback, setFeedback] = useState<Record<string, FeedbackValue>>({});
+  const [reminderStatus, setReminderStatus] = useState("Enable reminders");
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [compareLeft, setCompareLeft] = useState("");
+  const [compareRight, setCompareRight] = useState("");
   const [analysisTick, setAnalysisTick] = useState(0);
   const sourceRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
   const analysis = useMemo(() => analyzeDocument(documentText, context, threshold), [documentText, context, threshold, analysisTick]);
+  const documentType = useMemo(() => inferDocumentType(documentText), [documentText]);
+  const comparison = useMemo(() => compareVersions(compareLeft, compareRight), [compareLeft, compareRight]);
   const evaluation = useMemo(() => evaluateFixtures(), []);
   const keptFindings = analysis.findings.filter((finding) => !finding.filteredReason);
   const filteredFindings = analysis.findings.filter((finding) => finding.filteredReason);
+  const reviewFindings = filteredFindings.filter((finding) => finding.reviewReason);
+  const visibleFindings = keptFindings.filter((finding) => (categoryFilter === "All" || finding.category === categoryFilter) && (!findingQuery.trim() || `${finding.category} ${finding.sentence} ${finding.explanation}`.toLowerCase().includes(findingQuery.trim().toLowerCase())));
+  const aiBrief = useMemo(() => createAiBrief(keptFindings, documentName), [keptFindings, documentName]);
+  const actionFindings = keptFindings.filter((finding) => finding.category === "Deadline" || finding.category === "Requirement").slice(0, 5);
   const selectedFinding = analysis.findings.find((finding) => finding.id === selectedFindingId) ?? keptFindings[0];
   const keptSentenceCount = new Set(keptFindings.flatMap((finding) => finding.occurrences.map((occurrence) => occurrence.sentenceId))).size;
   const filteredSentenceCount = Math.max(0, analysis.sentences.length - keptSentenceCount);
   const reduction = analysis.sentences.length ? filteredSentenceCount / analysis.sentences.length : 0;
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(HISTORY_KEY);
+      if (stored) setHistory(JSON.parse(stored) as HistoryItem[]);
+    } catch { setHistory([]); }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(FEEDBACK_KEY);
+      if (stored) setFeedback(JSON.parse(stored) as Record<string, FeedbackValue>);
+    } catch { setFeedback({}); }
+  }, []);
+
+  useEffect(() => {
+    setContext(documentType.context);
+  }, [documentType.type]);
+
+  const saveToHistory = (text: string, name: string) => {
+    if (!text.trim()) return;
+    const item: HistoryItem = { id: `${Date.now()}-${name}`, name, text, context, savedAt: new Date().toISOString() };
+    setHistory((current) => {
+      const next = [item, ...current.filter((entry) => entry.name !== name)].slice(0, 8);
+      try { localStorage.setItem(HISTORY_KEY, JSON.stringify(next)); } catch { /* private browsing may disable storage */ }
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (!selectedFinding) return;
@@ -466,6 +663,7 @@ export default function Home() {
   }, [selectedFinding, sourceOpen]);
 
   const runAnalysis = () => {
+    saveToHistory(documentText, documentName);
     setAnalysisTick((value) => value + 1);
     setSelectedFindingId(null);
     setSourceOpen(false);
@@ -488,6 +686,7 @@ export default function Home() {
       if (!extractedText) throw new Error("No readable text was found in this file.");
       setDocumentText(extractedText);
       setDocumentName(file.name);
+      saveToHistory(extractedText, file.name);
       setView("analyze");
       setSourceOpen(false);
     } catch (error) {
@@ -497,11 +696,64 @@ export default function Home() {
     }
   };
 
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDragActive(false);
+    void handleFile(event.dataTransfer.files?.[0]);
+  };
+
   const loadFixture = (fixture: (typeof FIXTURES)[number]) => {
     setDocumentText(fixture.text);
     setDocumentName(`${fixture.title.toLowerCase().replace(/\s+/g, "-")}.txt`);
     setView("analyze");
     setSourceOpen(false);
+    saveToHistory(fixture.text, `${fixture.title.toLowerCase().replace(/\s+/g, "-")}.txt`);
+  };
+
+  const loadHistoryItem = (item: HistoryItem) => {
+    setDocumentText(item.text);
+    setDocumentName(item.name);
+    setContext(item.context);
+    setView("analyze");
+    setHistoryOpen(false);
+    setSourceOpen(false);
+  };
+
+  const openComparison = () => {
+    const previous = history.find((item) => item.name === documentName && item.text !== documentText) ?? history.find((item) => item.text !== documentText);
+    setCompareLeft(previous?.text ?? documentText);
+    setCompareRight(documentText);
+    setCompareOpen(true);
+    window.setTimeout(() => document.getElementById("comparison-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+  };
+
+  const jumpToWorkspace = (target: string, fallback = "findings-column") => {
+    setView("analyze");
+    window.setTimeout(() => {
+      const node = document.getElementById(target) ?? document.getElementById(fallback);
+      node?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 60);
+  };
+
+  const copyBrief = async () => {
+    try { await navigator.clipboard.writeText(aiBrief); setCopyStatus("Copied"); window.setTimeout(() => setCopyStatus("Copy brief"), 1400); } catch { setCopyStatus("Select and copy manually"); }
+  };
+
+  const markFeedback = (finding: Finding, value: FeedbackValue) => {
+    setFeedback((current) => {
+      const next = { ...current, [finding.id]: value };
+      try { localStorage.setItem(FEEDBACK_KEY, JSON.stringify(next)); } catch { /* storage is optional */ }
+      return next;
+    });
+  };
+
+  const enableReminders = async () => {
+    if (!("Notification" in window)) { setReminderStatus("Notifications unavailable"); return; }
+    const permission = Notification.permission === "default" ? await Notification.requestPermission() : Notification.permission;
+    if (permission !== "granted") { setReminderStatus("Permission not granted"); return; }
+    const deadlines = keptFindings.filter((finding) => finding.category === "Deadline");
+    deadlines.forEach((finding) => new Notification("Need2Know deadline", { body: `${finding.sentence} Verify the source before acting.` }));
+    setReminderStatus(`${deadlines.length} reminder${deadlines.length === 1 ? "" : "s"} sent`);
   };
 
   return (
@@ -518,6 +770,11 @@ export default function Home() {
         <div className="nav-label">Workspace</div>
         <nav className="nav-stack">
           <NavItem icon={ScanSearch} label="Analyze" active={view === "analyze"} onClick={() => setView("analyze")} />
+          <div className="workspace-subnav" aria-label="Analysis shortcuts">
+            <WorkspaceLink icon={ClipboardList} label="Action brief" onClick={() => jumpToWorkspace("action-brief")} />
+            <WorkspaceLink icon={AlertTriangle} label="Review queue" onClick={() => jumpToWorkspace("review-queue")} />
+            <WorkspaceLink icon={GitCompareArrows} label="Compare versions" onClick={openComparison} />
+          </div>
           <NavItem icon={BarChart3} label="Evaluation" active={view === "evaluation"} onClick={() => setView("evaluation")} />
           <NavItem icon={BookOpenCheck} label="How it works" active={view === "method"} onClick={() => setView("method")} />
         </nav>
@@ -541,8 +798,11 @@ export default function Home() {
           <div className="breadcrumb"><span>WORKSPACE</span><span className="breadcrumb-slash">/</span><strong>{view === "analyze" ? "DOCUMENT ANALYSIS" : view === "evaluation" ? "EVALUATION DASHBOARD" : "METHOD NOTE"}</strong></div>
           <div className="topbar-actions">
             <div className="live-pill"><span className="live-pulse" /> LIVE LOCAL PIPELINE</div>
-            <button className="icon-button" aria-label="Help"><CircleHelp size={18} /></button>
-            <button className="avatar-button" aria-label="Workspace profile">AR</button>
+            <div className="topbar-popover-wrap"><button className="icon-button" aria-label="Document history" aria-expanded={historyOpen} onClick={() => { setHistoryOpen((value) => !value); setHelpOpen(false); setProfileOpen(false); }}><Clock3 size={17} /></button>{historyOpen && <div className="topbar-popover history-popover" role="dialog" aria-label="Document history"><div className="popover-heading"><strong>Recent documents</strong><button className="text-button" onClick={() => { setHistory([]); localStorage.removeItem(HISTORY_KEY); }}>Clear all</button></div>{history.length ? history.map((item) => <button className="history-item" key={item.id} onClick={() => loadHistoryItem(item)}><FileText size={13} /><span><strong>{item.name}</strong><small>{new Date(item.savedAt).toLocaleString()}</small></span><ArrowUpRight size={12} /></button>) : <p>No saved documents yet. Analyze a document to create a private local history.</p>}</div>}</div>
+            <div className="topbar-popover-wrap"><button className="icon-button" aria-label="Help" aria-expanded={helpOpen} onClick={() => { setHelpOpen((value) => !value); setProfileOpen(false); setHistoryOpen(false); }}><CircleHelp size={18} /></button>{helpOpen && <div className="topbar-popover" role="dialog" aria-label="Need2Know help"><strong>Need2Know help</strong><p>Paste a document or drop a PDF, DOCX, or text file. Choose a reader context, tune the threshold, then open any finding to trace it back to the source.</p><button className="text-button" onClick={() => { setHelpOpen(false); setView("method"); }}>Read the method note <ArrowUpRight size={13} /></button></div>}</div>
+            <button className="icon-button" aria-label="Compare document versions" onClick={openComparison}><GitCompareArrows size={17} /></button>
+            <button className="icon-button" aria-label={`Switch to ${theme === "light" ? "dark" : "light"} theme`} onClick={() => toggleTheme?.()}>{theme === "light" ? <Moon size={17} /> : <Sun size={17} />}</button>
+            <div className="topbar-popover-wrap"><button className="avatar-button" aria-label="Workspace profile" aria-expanded={profileOpen} onClick={() => { setProfileOpen((value) => !value); setHelpOpen(false); }}>AR</button>{profileOpen && <div className="topbar-popover profile-popover" role="dialog" aria-label="Workspace profile"><strong>Analyst workspace</strong><p>This browser workspace keeps documents and exports local to your session. No external account or API key is required for the core pipeline.</p><span className="profile-status"><span className="mini-dot" /> Local pipeline ready</span></div>}</div>
           </div>
         </header>
 
@@ -567,7 +827,7 @@ export default function Home() {
                 <div className="file-badge"><FileText size={14} /> {documentName}</div>
               </div>
               <div className="ingest-grid">
-                <div className="dropzone">
+                <div className={classNames("dropzone", dragActive && "dropzone-active")} onDragEnter={(event) => { event.preventDefault(); setDragActive(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (event.currentTarget === event.target) setDragActive(false); }} onDrop={handleDrop}>
                   <input id="file-upload" type="file" accept="*/*" onChange={(event) => handleFile(event.target.files?.[0])} />
                   <label htmlFor="file-upload" className="dropzone-label">
                     <div className="upload-icon"><Upload size={19} /></div>
@@ -585,6 +845,8 @@ export default function Home() {
                 <button className="primary-button" onClick={runAnalysis}><Sparkles size={16} /> Analyze document <ArrowUpRight size={15} /></button>
               </div>
             </section>
+
+            {compareOpen && <ComparisonPanel leftText={compareLeft} rightText={compareRight} onLeftChange={setCompareLeft} onRightChange={setCompareRight} comparison={comparison} onClose={() => setCompareOpen(false)} />}
 
             <section className="control-row">
               <div className="context-control">
@@ -604,11 +866,20 @@ export default function Home() {
               <div className="compression-icon"><Filter size={20} /></div>
             </section>
 
+            <section className="ai-brief-card" id="action-brief">
+              <div className="card-heading"><div><div className="eyebrow">AI ACTION BRIEF / 02</div><h2>Do this first</h2></div><div className="brief-actions"><button className="text-button" onClick={copyBrief}><Copy size={13} /> {copyStatus}</button><button className="workflow-button" onClick={() => printDigest(documentName, documentType.type, keptFindings, aiBrief)} disabled={!keptFindings.length}><Download size={13} /> Print / PDF</button><button className="workflow-button" onClick={() => downloadDigestText(documentName, documentType.type, keptFindings, aiBrief)} disabled={!keptFindings.length}><FileText size={13} /> TXT digest</button><button className="workflow-button" onClick={() => downloadCalendar(keptFindings, documentName)} disabled={!keptFindings.some((finding) => finding.category === "Deadline")}><CalendarDays size={13} /> Add deadlines</button><button className="workflow-button" onClick={() => openEmailDraft(keptFindings, documentName)} disabled={!keptFindings.length}><Mail size={13} /> Email digest</button></div></div>
+              <div className="smart-meta-row"><span><Sparkles size={13} /> Detected document: <strong>{documentType.type}</strong> · {percent(documentType.confidence)} confidence</span><span>Context auto-selected: <strong>{documentType.context}</strong></span></div>
+              <div className="ai-brief-grid"><div><p className="ai-brief-intro">A local, explainable action plan generated from the highest-confidence deadlines and requirements. Tick items off as you verify them against the source.</p><div className="action-checklist">{actionFindings.length ? actionFindings.map((finding) => <label className={classNames("action-item", completedActions.includes(finding.id) && "action-item-done")} key={finding.id}><input type="checkbox" checked={completedActions.includes(finding.id)} onChange={() => setCompletedActions((items) => items.includes(finding.id) ? items.filter((item) => item !== finding.id) : [...items, finding.id])} /><span>{finding.sentence}</span></label>) : <span className="ai-empty">No deadline or requirement signals are above the current threshold.</span>}</div></div><pre className="ai-brief-text">{aiBrief}</pre></div>
+              <div className="deadline-panel"><div><div className="eyebrow">UPCOMING DEADLINES</div><strong>{keptFindings.filter((finding) => finding.category === "Deadline").length ? `${keptFindings.filter((finding) => finding.category === "Deadline").length} extracted deadline signals` : "No deadline signals found"}</strong><p>Browser reminders are on-demand and stay local to this session.</p></div><button className="workflow-button" onClick={enableReminders} disabled={!keptFindings.some((finding) => finding.category === "Deadline")}><Bell size={13} /> {reminderStatus}</button></div>
+            </section>
+
             <div className={classNames("workspace-grid", sourceOpen && "source-open")}>
-              <section className="findings-column">
-                <div className="results-head"><div><div className="eyebrow">RANKED SIGNALS / {context.toUpperCase()}</div><h2>{keptFindings.length ? "What deserves your attention" : "No findings above threshold"}</h2></div><div className="results-meta"><span className="model-badge"><span className="mini-dot" /> model + rules</span><span>{analysis.rawCandidateCount} candidates</span></div></div>
+              <section className="findings-column" id="findings-column">
+                <div className="results-head"><div><div className="eyebrow">RANKED SIGNALS / {context.toUpperCase()}</div><h2>{keptFindings.length ? "What deserves your attention" : "No findings above threshold"}</h2></div><div className="results-meta"><span className="model-badge"><span className="mini-dot" /> model + rules</span><span>{analysis.rawCandidateCount} candidates</span><button className="text-button export-button" onClick={() => downloadFindings(keptFindings, documentName)} disabled={!keptFindings.length}><Download size={13} /> Export JSON</button></div></div>
                 <div className="honesty-note"><Info size={14} /><span>Filtering is threshold-based and tuned on a small demo dataset. It can miss unusually phrased important information or filter out something relevant. Adjust the slider if results seem too aggressive or noisy.</span></div>
-                {keptFindings.length === 0 ? <div className="empty-state"><div className="empty-icon"><ListFilter size={24} /></div><h3>Nothing cleared the current bar.</h3><p>Lower the threshold to inspect lower-confidence candidates, or paste a document with more concrete requirements and dates.</p><button className="secondary-button" onClick={() => setThreshold(0.35)}>Reset threshold</button></div> : <div className="finding-list">{keptFindings.map((finding, index) => <FindingCard key={finding.id} finding={finding} index={index} onSource={openSource} />)}</div>}
+                {keptFindings.length > 0 && <div className="finding-tools"><label className="finding-search"><Search size={14} /><input value={findingQuery} onChange={(event) => setFindingQuery(event.target.value)} placeholder="Search surfaced findings" aria-label="Search surfaced findings" /></label><select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value as "All" | Category)} aria-label="Filter finding category"><option value="All">All categories</option>{CATEGORIES.map((category) => <option value={category} key={category}>{category}</option>)}</select><span>{visibleFindings.length} shown</span></div>}
+                {keptFindings.length === 0 ? <div className="empty-state"><div className="empty-icon"><ListFilter size={24} /></div><h3>Nothing cleared the current bar.</h3><p>Lower the threshold to inspect lower-confidence candidates, or paste a document with more concrete requirements and dates.</p><button className="secondary-button" onClick={() => setThreshold(0.35)}>Reset threshold</button></div> : visibleFindings.length === 0 ? <div className="empty-state"><div className="empty-icon"><Search size={24} /></div><h3>No matching findings.</h3><p>Try another search term or reset the category filter.</p><button className="secondary-button" onClick={() => { setFindingQuery(""); setCategoryFilter("All"); }}>Reset filters</button></div> : <div className="finding-list">{visibleFindings.map((finding, index) => <FindingCard key={finding.id} finding={finding} index={index} feedback={feedback[finding.id]} onFeedback={markFeedback} onSource={openSource} />)}</div>}
+                {reviewFindings.length > 0 && <section className="review-queue" id="review-queue"><div className="review-heading"><div><div className="eyebrow">UNCERTAINTY QUEUE</div><h3>Needs review before dismissal</h3></div><span>{reviewFindings.length} borderline</span></div><p>These findings sit just below the active threshold. They are not counted as kept, but they should not disappear silently.</p>{reviewFindings.map((finding) => <div className="review-item" key={finding.id}><span className="filtered-category" style={{ color: CATEGORY_META[finding.category].color }}>{finding.category}</span><span>{finding.sentence}</span><button className="source-button" onClick={() => openSource(finding)}>Inspect <ArrowUpRight size={12} /></button></div>)}</section>}
                 {filteredFindings.length > 0 && <div className="filtered-section"><button className="filtered-toggle" onClick={() => setShowFiltered((value) => !value)}><span><Filter size={15} /> Show filtered content <small>{filteredFindings.length}</small></span><ChevronDown size={16} className={classNames(showFiltered && "rotate-180")} /></button>{showFiltered && <div className="filtered-list">{filteredFindings.map((finding) => <div className="filtered-item" key={finding.id}><span className="filtered-category" style={{ color: CATEGORY_META[finding.category].color }}>{finding.category}</span><span>{finding.sentence}</span><em>{finding.filteredReason}</em></div>)}</div>}</div>}
               </section>
 
@@ -628,11 +899,15 @@ export default function Home() {
   );
 }
 
-function FindingCard({ finding, index, onSource }: { finding: Finding; index: number; onSource: (finding: Finding, sentenceId?: number) => void }) {
+function ComparisonPanel({ leftText, rightText, onLeftChange, onRightChange, comparison, onClose }: { leftText: string; rightText: string; onLeftChange: (value: string) => void; onRightChange: (value: string) => void; comparison: ReturnType<typeof compareVersions>; onClose: () => void }) {
+  return <section className="comparison-panel" id="comparison-panel"><div className="comparison-heading"><div><div className="eyebrow">VERSION COMPARISON / 04</div><h2>See what changed.</h2><p>Paste or load two versions to review sentence-level additions and removals before rerunning the analyzer.</p></div><button className="icon-button small" aria-label="Close comparison" onClick={onClose}><X size={16} /></button></div><div className="comparison-inputs"><label><span>Previous version</span><textarea value={leftText} onChange={(event) => onLeftChange(event.target.value)} /></label><label><span>Current version</span><textarea value={rightText} onChange={(event) => onRightChange(event.target.value)} /></label></div><div className="comparison-summary"><span className="comparison-added">+ {comparison.added.length} added</span><span className="comparison-removed">− {comparison.removed.length} removed</span><span>{comparison.unchanged.length} unchanged</span></div><div className="comparison-diff">{comparison.added.map((sentence) => <div className="diff-row diff-added" key={`added-${sentence.id}`}><strong>ADDED</strong><span>{sentence.text}</span></div>)}{comparison.removed.map((sentence) => <div className="diff-row diff-removed" key={`removed-${sentence.id}`}><strong>REMOVED</strong><span>{sentence.text}</span></div>)}{!comparison.added.length && !comparison.removed.length && <div className="diff-empty">No sentence-level changes detected yet.</div>}</div></section>;
+}
+
+function FindingCard({ finding, index, feedback, onFeedback, onSource }: { finding: Finding; index: number; feedback?: FeedbackValue; onFeedback: (finding: Finding, value: FeedbackValue) => void; onSource: (finding: Finding, sentenceId?: number) => void }) {
   const meta = CATEGORY_META[finding.category];
   return <article className="finding-card" style={{ "--category-color": meta.color, "--category-soft": meta.soft } as CSSProperties}>
     <div className="finding-rail"><span>{String(index + 1).padStart(2, "0")}</span><div className="finding-rule" /></div>
-    <div className="finding-body"><div className="finding-top"><span className="category-label"><span className="category-dot" /> {finding.category}</span><span className="confidence-label">{finding.matchLabel} · {percent(finding.confidence)} confidence</span></div><p className="finding-sentence">{finding.sentence}</p><p className="finding-explanation">{finding.explanation}</p><div className="finding-footer"><button className="source-button" onClick={() => onSource(finding)}><ExternalLink size={14} /> View in source <span>· sentence {finding.occurrences[0].sentenceId + 1}</span></button><div className="finding-score"><span>relevance</span><strong>{finding.score.toFixed(2)}</strong></div></div>{finding.occurrences.length > 1 && <details className="occurrence-details"><summary><Layers3 size={13} /> Mentioned in {finding.occurrences.length} places <ChevronDown size={14} /></summary><div className="occurrence-list">{finding.occurrences.map((occurrence) => <button key={`${finding.id}-${occurrence.sentenceId}`} onClick={() => onSource(finding, occurrence.sentenceId)}>Sentence {occurrence.sentenceId + 1} <ArrowUpRight size={13} /></button>)}</div></details>}</div>
+    <div className="finding-body"><div className="finding-top"><span className="category-label"><span className="category-dot" /> {finding.category}</span><span className="confidence-label">{finding.matchLabel} · {percent(finding.confidence)} confidence</span></div><p className="finding-sentence">{finding.sentence}</p><p className="finding-explanation">{finding.explanation}</p><details className="evidence-details"><summary><ShieldCheck size={13} /> Why this was classified <ChevronDown size={14} /></summary><div className="evidence-grid"><div><span>Top model terms</span><b>{finding.evidence.terms.join(" · ") || "No dominant terms"}</b></div><div><span>Matched rules</span><b>{finding.evidence.rules.join(" · ") || "No explicit rule"}</b></div></div></details><div className="finding-footer"><button className="source-button" onClick={() => onSource(finding)}><ExternalLink size={14} /> View in source <span>· sentence {finding.occurrences[0].sentenceId + 1}</span></button><div className="finding-score"><span>relevance</span><strong>{finding.score.toFixed(2)}</strong></div></div><div className="feedback-row"><span>Was this useful?</span><button className={classNames(feedback === "useful" && "feedback-active")} onClick={() => onFeedback(finding, "useful")}>Useful</button><button className={classNames(feedback === "irrelevant" && "feedback-active feedback-negative")} onClick={() => onFeedback(finding, "irrelevant")}>Not relevant</button></div>{finding.occurrences.length > 1 && <details className="occurrence-details"><summary><Layers3 size={13} /> Mentioned in {finding.occurrences.length} places <ChevronDown size={14} /></summary><div className="occurrence-list">{finding.occurrences.map((occurrence) => <button key={`${finding.id}-${occurrence.sentenceId}`} onClick={() => onSource(finding, occurrence.sentenceId)}>Sentence {occurrence.sentenceId + 1} <ArrowUpRight size={13} /></button>)}</div></details>}</div>
   </article>;
 }
 
